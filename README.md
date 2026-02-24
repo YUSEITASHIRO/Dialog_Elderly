@@ -848,7 +848,7 @@ $$\text{StdF0\_Hz} = \sqrt{\frac{1}{N} \sum_{t \in \text{voiced}} (f_0(t) - \ove
 有声フレームの `np.nanmax()` / `np.nanmin()` です。  
 `ana_results.py` でこれらの差から `F0_Range_Hz` を計算します：
 
-$$\text{F0_Range_Hz} = \text{MaxF0_Hz} - \text{MinF0_Hz}$$
+$$\text{F0\_Range\_Hz} = \text{MaxF0\_Hz} - \text{MinF0\_Hz}$$
 
 ### 4.4 半音換算ピッチ（MeanF0_Semitone / StdF0_Semitone）
 
