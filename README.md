@@ -840,7 +840,7 @@ $$\text{MeanF0} \_ \text{Hz} = \frac{1}{N} \sum_{t \in \text{voiced}} f_0(t)$$
 
 ### 4.2 ピッチ標準偏差・イントネーション（StdF0_Hz）
 
-$$\text{StdF0}\_\text{Hz} = \sqrt{\frac{1}{N} \sum_{t \in \text{voiced}} (f_0(t) - \overline{f_0})^2}$$
+$$\text{StdF0} \_ \text{Hz} = \sqrt{\frac{1}{N} \sum_{t \in \text{voiced}} (f_0(t) - \overline{f_0})^2}$$
 
 `np.nanstd()` で算出します（母集団標準偏差、`ddof=0`）。  
 発話内のイントネーション変動の大きさを表します。
@@ -850,7 +850,7 @@ $$\text{StdF0}\_\text{Hz} = \sqrt{\frac{1}{N} \sum_{t \in \text{voiced}} (f_0(t)
 有声フレームの `np.nanmax()` / `np.nanmin()` です。  
 `ana_results.py` でこれらの差から `F0_Range_Hz` を計算します：
 
-$$\text{F0\_Range\_Hz} = \text{MaxF0\_Hz} - \text{MinF0\_Hz}$$
+$$\text{F0} \_ \text{Range} \_ \text{Hz} = \text{MaxF0} \_ \text{Hz} - \text{MinF0} \_ \text{Hz}$$
 
 ### 4.4 半音換算ピッチ（MeanF0_Semitone / StdF0_Semitone）
 
@@ -951,9 +951,9 @@ for t in times:
 
 有効点が2点以上の場合、`np.polyfit` で一次回帰を行い傾きを取得します：
 
-$$\text{Slope\_Hz} = \frac{\Delta f_0 \text{（Hz）}}{\Delta t \text{（秒）}}$$
+$$\text{Slope} \_ \text{Hz} = \frac{\Delta f_0 \text{（Hz）}}{\Delta t \text{（秒）}}$$
 
-$$\text{Slope\_Semi} = \frac{\Delta f_0 \text{（半音）}}{\Delta t \text{（秒）}}$$
+$$\text{Slope} \_ \text{Semi} = \frac{\Delta f_0 \text{（半音）}}{\Delta t \text{（秒）}}$$
 
 **正の傾き** → 末尾上昇（疑問調・継続の意志など）  
 **負の傾き** → 末尾下降（断言・発話完了など）
@@ -982,7 +982,7 @@ vowel_durs.append(v_dur)
 
 収集した全母音長の平均値をミリ秒換算して出力します：
 
-$$\text{MeanVowelDuration\_ms} = \overline{v_{\text{dur}}} \times 1000$$
+$$\text{MeanVowelDuration} \_ \text{ms} = \overline{v_{\text{dur}}} \times 1000$$
 
 特殊拍（撥音・促音）は母音としてカウントしません。
 
