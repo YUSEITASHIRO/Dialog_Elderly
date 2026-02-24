@@ -661,6 +661,8 @@ ana_totalResults.py で扱う23指標です。
 | `Loc_Un_Pitch_Hz` | 「うん」相槌の平均ピッチ（Hz） |
 | `Loc_Un_Intensity_dB` | 「うん」相槌の平均強度（dB） |
 
+---
+---
 
 # 音響指標の導出方法詳細（ana_acoustic.py）
 
