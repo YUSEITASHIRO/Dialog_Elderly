@@ -1221,25 +1221,25 @@ w_int = np.nanmean(i_vals_w) if len(i_vals_w) > 0 else np.nan
 | カラム名 | 型 | 説明 |
 |---|---|---|
 | 会話ID | str | 会話識別子（例：C002_006a） |
-| 対高齢者含む | int | 65歳以上が含まれる場合 1 |
-| 対後期高齢者含む | int | 75歳以上が含まれる場合 1 |
+| 対高齢者含む | int | 65歳以上で構成される場合 1 |
+| 対後期高齢者含む | int | 75歳以上で構成される場合 1 |
 
 **条件判定ロジック：**
 
 ```python
 if r.get('対高齢者含む') == 0:
     conditions.append("[Non-Elderly]")
-if r.get('対高齢者含む') == 1:
+if r.get('対高齢者のみ') == 1:
     conditions.append("[Elderly]")
-if r.get('対後期高齢者含む') == 1:
+if r.get('対後期高齢者のみ') == 1:
     conditions.append("[Late Elderly]")
 ```
 
 - **[Non-Elderly]**：参加者全員が0-64歳（対高齢者含む = 0）
-- **[Elderly]**：65歳以上の参加者が少なくとも1人（対高齢者含む = 1）
-- **[Late Elderly]**：75歳以上の参加者が少なくとも1人（対後期高齢者含む = 1）
+- **[Elderly]**：65歳以上の参加者だけ（対高齢者のみ = 1）
+- **[Late Elderly]**：75歳以上の参加者だけ（対後期高齢者のみ = 1）
 
-**重要：** 1つのセッションが複数条件を満たす場合（例：65歳と75歳の両方が含まれる）、  
+**重要：** 1つのセッションが複数条件を満たす場合（例：75歳以上の場合は自動的に65歳以上）、  
 `[Elderly]` と `[Late Elderly]` の両方のラベルが付与されます。
 
 ---
@@ -1376,12 +1376,12 @@ if not ses_row.empty:
     if r.get('対高齢者含む') == 0:
         conditions.append("[Non-Elderly]")
     
-    # 対高齢者: 65歳以上の参加者が少なくとも1人含まれる
-    if r.get('対高齢者含む') == 1:
+    # 対高齢者: 65歳以上の参加者が含まれる
+    if r.get('対高齢者のみ') == 1:
         conditions.append("[Elderly]")
     
-    # 対後期高齢者: 75歳以上の参加者が少なくとも1人含まれる
-    if r.get('対後期高齢者含む') == 1:
+    # 対後期高齢者: 75歳以上の参加者が含まれる
+    if r.get('対後期高齢者のみ') == 1:
         conditions.append("[Late Elderly]")
 else:
     conditions.append("Unknown")
