@@ -1450,7 +1450,7 @@ except Exception as e:
 
 **F0_Range_Hz の計算：**
 
-$$\text{F0\_Range\_Hz} = \text{MaxF0\_Hz} - \text{MinF0\_Hz}$$
+$$\text{F0}\textunderscore\text{Range}\textunderscore\text{Hz} = \text{MaxF0}\textunderscore\text{Hz} - \text{MinF0}\textunderscore\text{Hz}$$
 
 これは発話内のピッチ変動幅を表します。  
 `ana_acoustic.py` では MaxF0_Hz と MinF0_Hz のみを出力するため、  
