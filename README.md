@@ -1141,3 +1141,1497 @@ w_int = np.nanmean(i_vals_w) if len(i_vals_w) > 0 else np.nan
 | VSA_Area | 有効なフォルマント値を持つ母音が3種類未満 |
 | F1_{v} / F2_{v} | 当該母音が区間内に出現しない、またはフォルマント推定失敗 |
 | MeanIntensity_dB | 強度フレームが0件（区間が極めて短い場合） |
+
+
+---
+
+---
+
+# 発話レベル統計分析パイプライン詳細ドキュメント
+
+このドキュメントでは、発話レベルデータの統合から統計分析までを担う2つのスクリプトについて、  
+実装の詳細・アルゴリズム・統計手法を詳しく解説します。
+
+---
+
+## 目次
+
+1. [ana_make_utterance_data.py - 発話レベルデータ統合](#1-ana_make_utterance_datapy---発話レベルデータ統合)
+2. [ana_test_LMM.py - 発話レベル統計検定](#2-ana_test_lmmpy---発話レベル統計検定)
+
+---
+
+# 1. ana_make_utterance_data.py - 発話レベルデータ統合
+
+## 1.1 目的と概要
+
+`ana_make_utterance_data.py` は、`ana_acoustic.py` が生成した発話単位の音響特徴量CSVファイルを  
+統合し、メタデータ（会話ID、話者ID、性別、条件ラベル）を付与して、  
+発話レベルの包括的なデータセットを構築します。
+
+### 主な機能
+
+- **複数CSVファイルの統合**：`Result/` フォルダ内の全 `Result_Analysis_*.csv` を結合
+- **ID情報の自動抽出**：ファイル名から ConvID と SpeakerID を解析
+- **メタデータの付与**：セッション・参加者情報から条件と性別を取得
+- **特徴量の計算**：F0_Range_Hz の算出
+- **条件ごとのデータ複製**：複数条件に該当するセッションを適切に展開
+
+---
+
+## 1.2 入力ファイル
+
+### 1.2.1 音響特徴量CSV（必須）
+
+**パス：** `Result/Result_Analysis_*.csv`
+
+`ana_acoustic.py` の出力ファイル。1行が1発話区間（Section_LUU / LUU / Bunsetsu）または  
+1単語（Local）に対応します。
+
+**主要カラム：**
+
+| カラム名 | 型 | 説明 |
+|---|---|---|
+| BaseName | str | 元ファイル名（拡張子なし） |
+| DataType | str | 発話単位タイプ（Section_LUU / LUU / Bunsetsu / Local） |
+| Text | str | 発話テキスト |
+| StartTime / EndTime | float | 区間時刻（秒） |
+| Duration_ms | float | 区間長（ms） |
+| SpeechRate | float | 発話速度（モーラ/秒） |
+| MeanF0_Hz | float | 平均F0（Hz） |
+| StdF0_Hz | float | F0標準偏差（Hz） |
+| MaxF0_Hz / MinF0_Hz | float | F0最大・最小値（Hz） |
+| MeanF0_Semitone / StdF0_Semitone | float | ピッチ（半音） |
+| TerminalRise_Slope_Hz / _Semi | float | 末尾ピッチ傾き |
+| MeanIntensity_dB | float | 平均強度（dB） |
+| MeanVowelDuration_ms | float | 平均母音長（ms） |
+| VSA_Area | float | 母音空間面積（Hz²） |
+| F1_{a/i/u/e/o} / F2_{a/i/u/e/o} | float | 各母音のフォルマント |
+
+---
+
+### 1.2.2 data_session.csv（必須）
+
+**パス：** `data_session.csv`（BASE_DIR直下）
+
+各セッションのメタデータ。条件ラベルの判定に使用します。
+
+**重要カラム：**
+
+| カラム名 | 型 | 説明 |
+|---|---|---|
+| 会話ID | str | 会話識別子（例：C002_006a） |
+| 対高齢者含む | int | 65歳以上が含まれる場合 1 |
+| 対後期高齢者含む | int | 75歳以上が含まれる場合 1 |
+
+**条件判定ロジック：**
+
+```python
+if r.get('対高齢者含む') == 0:
+    conditions.append("[Non-Elderly]")
+if r.get('対高齢者含む') == 1:
+    conditions.append("[Elderly]")
+if r.get('対後期高齢者含む') == 1:
+    conditions.append("[Late Elderly]")
+```
+
+- **[Non-Elderly]**：参加者全員が0-64歳（対高齢者含む = 0）
+- **[Elderly]**：65歳以上の参加者が少なくとも1人（対高齢者含む = 1）
+- **[Late Elderly]**：75歳以上の参加者が少なくとも1人（対後期高齢者含む = 1）
+
+**重要：** 1つのセッションが複数条件を満たす場合（例：65歳と75歳の両方が含まれる）、  
+`[Elderly]` と `[Late Elderly]` の両方のラベルが付与されます。
+
+---
+
+### 1.2.3 data_participant.csv（必須）
+
+**パス：** `data_participant.csv`（BASE_DIR直下）
+
+各話者のメタデータ。性別情報の取得に使用します。
+
+**重要カラム：**
+
+| カラム名 | 型 | 説明 |
+|---|---|---|
+| 会話ID | str | 会話識別子 |
+| 話者IC | str | 話者識別子（例：IC01） |
+| 性別 | str | 男性 / 女性 |
+
+**性別の変換：**
+
+```python
+if g == '男性': gender = 'Male'
+elif g == '女性': gender = 'Female'
+else: gender = g
+```
+
+---
+
+## 1.3 処理フロー詳細
+
+### 1.3.1 初期化とメタデータ読み込み
+
+```python
+def generate_all_utterance_data():
+    setup_dirs()  # OUTPUT_DIR を作成
+    
+    # メタデータ読み込み（エンコーディング自動判定）
+    try:
+        df_ses = pd.read_csv(SESSION_CSV, encoding='cp932')
+        df_par = pd.read_csv(PARTICIPANT_CSV, encoding='cp932')
+    except:
+        df_ses = pd.read_csv(SESSION_CSV, encoding='utf-8')
+        df_par = pd.read_csv(PARTICIPANT_CSV, encoding='utf-8')
+    
+    # カラム名の空白除去
+    df_ses.columns = [c.strip() for c in df_ses.columns]
+    df_par.columns = [c.strip() for c in df_par.columns]
+```
+
+**エンコーディング処理：**
+- 日本語CSVは cp932（Shift-JIS）または UTF-8 の可能性があるため、  
+  cp932 で試行し、失敗した場合は UTF-8 にフォールバック
+
+**カラム名の正規化：**
+- Excel等で作成されたCSVにはカラム名の前後に空白が含まれる場合があるため、  
+  `.strip()` で除去
+
+---
+
+### 1.3.2 CSVファイルの収集
+
+```python
+csv_files = glob.glob(os.path.join(RESULT_DIR, "Result_Analysis_*.csv"))
+if not csv_files:
+    print("No utterance CSV files found in Result/ directory.")
+    return
+
+print(f"Integrating {len(csv_files)} files...")
+```
+
+**検索パターン：** `Result/Result_Analysis_*.csv`
+- `Result_Analysis_C002_001_IC01.csv` 等のファイルを収集
+
+---
+
+### 1.3.3 ファイル名からのID抽出
+
+各CSVファイルのファイル名から ConvID（会話ID）と SpeakerID（話者IC）を抽出します。
+
+```python
+base_name = os.path.basename(file_path).replace("Result_Analysis_", "").replace(".csv", "").strip()
+
+# 正規表現で抽出を試行
+match = re.match(r'(.+)_(IC\d+|Z\d+[A-Z]?|[A-Z]+\d+)', base_name)
+if match:
+    conv_id = match.group(1)      # 例：C002_001
+    speaker_id = match.group(2)   # 例：IC01
+else:
+    # フォールバック：アンダースコアで分割
+    parts = base_name.split('_')
+    conv_id = parts[0]
+    speaker_id = parts[-1] if len(parts) > 1 else "Unknown"
+```
+
+**正規表現パターンの詳細：**
+
+```
+(.+)_(IC\d+|Z\d+[A-Z]?|[A-Z]+\d+)
+```
+
+- `(.+)`：会話ID部分（最初のグループ）
+- `_`：区切り文字
+- `(IC\d+|Z\d+[A-Z]?|[A-Z]+\d+)`：話者ID部分（第2グループ）
+  - `IC\d+`：標準形式（IC01, IC02, ...）
+  - `Z\d+[A-Z]?`：テスト話者形式（Z01, Z01A, ...）
+  - `[A-Z]+\d+`：その他の形式（ABC01, ...）
+
+**具体例：**
+
+| ファイル名（拡張子なし） | ConvID | SpeakerID |
+|---|---|---|
+| `C002_001_IC01` | `C002_001` | `IC01` |
+| `C015_012a_IC03` | `C015_012a` | `IC03` |
+| `T001_test_Z01A` | `T001_test` | `Z01A` |
+
+---
+
+### 1.3.4 条件ラベルの付与
+
+```python
+# セッション情報から条件を判定
+conditions = []
+ses_row = df_ses[df_ses['会話ID'] == conv_id]
+
+if ses_row.empty:
+    # プレフィックスマッチングを試行（C002_001a → C002_001）
+    short_id = conv_id.split('_')[0]
+    ses_row = df_ses[df_ses['会話ID'] == short_id]
+
+if not ses_row.empty:
+    r = ses_row.iloc[0]
+    
+    # 非対高齢者: 参加者全員が0-64歳
+    if r.get('対高齢者含む') == 0:
+        conditions.append("[Non-Elderly]")
+    
+    # 対高齢者: 65歳以上の参加者が少なくとも1人含まれる
+    if r.get('対高齢者含む') == 1:
+        conditions.append("[Elderly]")
+    
+    # 対後期高齢者: 75歳以上の参加者が少なくとも1人含まれる
+    if r.get('対後期高齢者含む') == 1:
+        conditions.append("[Late Elderly]")
+else:
+    conditions.append("Unknown")
+```
+
+**フォールバック機構：**
+1. 完全一致で検索（`C002_001a`）
+2. 失敗した場合、最初のアンダースコアまでを使用（`C002`）
+3. それでも見つからない場合、"Unknown" を付与
+
+**条件の複数付与：**
+- 例：65歳と75歳の両方が参加するセッション
+  - `conditions = ["[Elderly]", "[Late Elderly]"]`
+  - 後述の処理で、各条件ごとにデータを複製
+
+---
+
+### 1.3.5 性別情報の付与
+
+```python
+gender = "Unknown"
+par_row = df_par[(df_par['会話ID'] == conv_id) & (df_par['話者IC'] == speaker_id)]
+
+if par_row.empty and '_' in conv_id:
+    # プレフィックスマッチングを試行
+    par_row = df_par[(df_par['会話ID'] == conv_id.split('_')[0]) & (df_par['話者IC'] == speaker_id)]
+
+if not par_row.empty:
+    g = par_row.iloc[0].get('性別', 'Unknown')
+    if g == '男性': gender = 'Male'
+    elif g == '女性': gender = 'Female'
+    else: gender = g
+```
+
+**検索戦略：**
+1. 会話IDと話者ICの完全一致で検索
+2. 失敗した場合、会話IDのプレフィックスで再検索
+3. それでも見つからない場合、"Unknown"
+
+---
+
+### 1.3.6 発話レベルデータの読み込みと処理
+
+```python
+try:
+    df_utterance = pd.read_csv(file_path)
+    
+    # F0_Range_Hz を計算
+    if 'MaxF0_Hz' in df_utterance.columns and 'MinF0_Hz' in df_utterance.columns:
+        df_utterance['F0_Range_Hz'] = df_utterance['MaxF0_Hz'] - df_utterance['MinF0_Hz']
+    
+    # メタデータを追加
+    df_utterance['ConvID'] = conv_id
+    df_utterance['SpeakerID'] = speaker_id
+    df_utterance['Gender'] = gender
+    
+    # 条件ごとにデータを複製して格納
+    for c in conditions:
+        df_cond = df_utterance.copy()
+        df_cond['Condition'] = c
+        all_rows.append(df_cond)
+        
+except Exception as e:
+    print(f"Error reading {base_name}: {e}")
+```
+
+**F0_Range_Hz の計算：**
+
+$$\text{F0\_Range\_Hz} = \text{MaxF0\_Hz} - \text{MinF0\_Hz}$$
+
+これは発話内のピッチ変動幅を表します。  
+`ana_acoustic.py` では MaxF0_Hz と MinF0_Hz のみを出力するため、  
+ここで差分を計算して新しいカラムとして追加します。
+
+**条件ごとの複製：**
+
+重要なポイントとして、1つのファイルが複数条件に該当する場合、  
+**各条件ごとに独立した行としてデータを複製**します。
+
+**例：**
+
+| 元データ | 条件リスト | 出力データ |
+|---|---|---|
+| 発話1（会話A） | `["[Elderly]", "[Late Elderly]"]` | 発話1（条件=[Elderly]）<br>発話1（条件=[Late Elderly]） |
+| 発話2（会話A） | `["[Elderly]", "[Late Elderly]"]` | 発話2（条件=[Elderly]）<br>発話2（条件=[Late Elderly]） |
+
+これにより、統計分析時に各条件を独立したグループとして扱えます。
+
+---
+
+### 1.3.7 統合とCSV保存
+
+```python
+if all_rows:
+    df_all = pd.concat(all_rows, ignore_index=True)
+    out_path = os.path.join(OUTPUT_DIR, "All_Total_File_Stats.csv")
+    df_all.to_csv(out_path, index=False, encoding='utf-8-sig')
+    print(f"Completed! Total utterance rows: {len(df_all)}")
+    print(f"Saved to: {out_path}")
+else:
+    print("No valid data could be aggregated.")
+```
+
+**出力ファイル：** `Comparison_Result/anaTotal/All_Total_File_Stats.csv`
+
+**エンコーディング：** `utf-8-sig`（BOM付きUTF-8）
+- Excel等で開いた際に文字化けを防ぐため
+
+**ignore_index=True：** 行インデックスをリセット（0から振り直す）
+
+---
+
+## 1.4 出力データ構造
+
+### 1.4.1 All_Total_File_Stats.csv のカラム一覧
+
+| カラム名 | 型 | 説明 | 由来 |
+|---|---|---|---|
+| **メタデータ（追加）** | | | |
+| ConvID | str | 会話ID | ファイル名から抽出 |
+| SpeakerID | str | 話者IC | ファイル名から抽出 |
+| Gender | str | 性別（Male / Female） | data_participant.csv |
+| Condition | str | 条件ラベル | data_session.csv |
+| **元の音響特徴量** | | | |
+| BaseName | str | 元ファイル名 | Result_Analysis_*.csv |
+| DataType | str | 発話単位タイプ | Result_Analysis_*.csv |
+| Text | str | 発話テキスト | Result_Analysis_*.csv |
+| StartTime / EndTime | float | 区間時刻（秒） | Result_Analysis_*.csv |
+| Duration_ms | float | 区間長（ms） | Result_Analysis_*.csv |
+| SpeechRate | float | 発話速度（モーラ/秒） | Result_Analysis_*.csv |
+| MeanF0_Hz | float | 平均F0（Hz） | Result_Analysis_*.csv |
+| StdF0_Hz | float | F0標準偏差（Hz） | Result_Analysis_*.csv |
+| MaxF0_Hz / MinF0_Hz | float | F0最大・最小値（Hz） | Result_Analysis_*.csv |
+| **計算された特徴量** | | | |
+| F0_Range_Hz | float | ピッチレンジ（Hz） | MaxF0_Hz - MinF0_Hz |
+| MeanF0_Semitone / StdF0_Semitone | float | ピッチ（半音） | Result_Analysis_*.csv |
+| TerminalRise_Slope_Hz / _Semi | float | 末尾ピッチ傾き | Result_Analysis_*.csv |
+| MeanIntensity_dB | float | 平均強度（dB） | Result_Analysis_*.csv |
+| MeanVowelDuration_ms | float | 平均母音長（ms） | Result_Analysis_*.csv |
+| VSA_Area | float | 母音空間面積（Hz²） | Result_Analysis_*.csv |
+| F1_{a/i/u/e/o} / F2_{a/i/u/e/o} | float | 各母音のフォルマント | Result_Analysis_*.csv |
+
+---
+
+### 1.4.2 データサイズの例
+
+**仮定：**
+- 話者数：50人
+- 1話者あたり平均5ファイル
+- 1ファイルあたり平均200発話（Section_LUU + LUU + Bunsetsu）
+- 条件複製係数：1.5（一部のファイルが複数条件に該当）
+
+**計算：**
+
+```
+総行数 = 50人 × 5ファイル × 200発話 × 1.5（複製）
+      = 75,000 行
+```
+
+実際のデータセットでは数万〜数十万行になることがあります。
+
+---
+
+## 1.5 エラーハンドリング
+
+### 1.5.1 ファイル読み込みエラー
+
+```python
+try:
+    df_utterance = pd.read_csv(file_path)
+    # ... 処理 ...
+except Exception as e:
+    print(f"Error reading {base_name}: {e}")
+```
+
+個別のCSVファイル読み込みエラーが発生しても、スクリプト全体は継続します。  
+エラーが発生したファイルはスキップされ、ログに記録されます。
+
+---
+
+### 1.5.2 メタデータ欠損への対応
+
+**セッション情報が見つからない場合：**
+
+```python
+if ses_row.empty:
+    # プレフィックスで再検索
+    short_id = conv_id.split('_')[0]
+    ses_row = df_ses[df_ses['会話ID'] == short_id]
+    
+if not ses_row.empty:
+    # 条件判定処理
+else:
+    conditions.append("Unknown")  # 最終フォールバック
+```
+
+**話者情報が見つからない場合：**
+
+```python
+if not par_row.empty:
+    g = par_row.iloc[0].get('性別', 'Unknown')
+    # 性別変換
+else:
+    gender = "Unknown"  # デフォルト値
+```
+
+**Unknown データの扱い：**
+- 条件が "Unknown" のデータは統計分析時に除外されます
+- 性別が "Unknown" のデータも同様に除外可能
+
+---
+
+## 1.6 実行例
+
+### 1.6.1 基本的な実行
+
+```bash
+cd /path/to/project
+python ana_make_utterance_data.py
+```
+
+**標準出力例：**
+
+```
+Loading Metadata...
+Integrating 127 files...
+Completed! Total utterance rows: 58342
+Saved to: E:\DATA\work\Comparison_Result\anaTotal\All_Total_File_Stats.csv
+```
+
+---
+
+### 1.6.2 実行前の確認事項
+
+**チェックリスト：**
+
+- [ ] `Result/` フォルダに `Result_Analysis_*.csv` が存在する
+- [ ] `data_session.csv` が BASE_DIR に存在する
+- [ ] `data_participant.csv` が BASE_DIR に存在する
+- [ ] `Comparison_Result/anaTotal/` ディレクトリの書き込み権限がある
+
+**確認コマンド：**
+
+```bash
+# CSVファイル数の確認
+ls Result/Result_Analysis_*.csv | wc -l
+
+# メタデータの確認
+head -n 5 data_session.csv
+head -n 5 data_participant.csv
+```
+
+---
+
+## 1.7 トラブルシューティング
+
+### 1.7.1 「No utterance CSV files found」エラー
+
+**原因：** `Result/` フォルダにCSVファイルが存在しない
+
+**解決策：**
+
+```bash
+# ana_acoustic.py を実行して音響特徴量を抽出
+python ana_acoustic.py
+```
+
+---
+
+### 1.7.2 エンコーディングエラー
+
+**原因：** メタデータCSVのエンコーディングが cp932 でも utf-8 でもない
+
+**解決策：**
+
+```python
+# スクリプトを修正して他のエンコーディングを試す
+df_ses = pd.read_csv(SESSION_CSV, encoding='latin-1')  # 例
+```
+
+---
+
+### 1.7.3 ID抽出失敗
+
+**原因：** ファイル名形式が想定外のパターン
+
+**症状：** `speaker_id = "Unknown"`
+
+**デバッグ方法：**
+
+```python
+# スクリプトに以下を追加
+print(f"Parsing: {base_name}")
+print(f"  -> ConvID: {conv_id}, SpeakerID: {speaker_id}")
+```
+
+**解決策：** 正規表現パターンを修正
+
+---
+
+# 2. ana_test_LMM.py - 発話レベル統計検定
+
+## 2.1 目的と概要
+
+`ana_test_LMM.py` は、`ana_make_utterance_data.py` が生成した発話レベルデータに対して、  
+3種類の統計検定を実施します：
+
+1. **Welch の t 検定**：基本的な条件間比較
+2. **Speaker-Only LMM**：話者を変量効果として制御
+3. **Hierarchical LMM**：話者+セッションの2層階層モデル
+
+### 主な特徴
+
+- **包括的な指標分析**：24種類の音響指標すべてを対象
+- **3つの発話単位タイプ**：Section_LUU / LUU / Bunsetsu を独立分析
+- **3つの比較ペア**：Non vs Elderly、Non vs Late Elderly、Elderly vs Late Elderly
+- **尤度比検定（LRT）**：LMMの有意性をより厳密に評価
+- **自動フォールバック**：Hierarchical LMM が収束しない場合、Speaker-Only に自動切替
+
+---
+
+## 2.2 入力ファイル
+
+### 2.2.1 All_Total_File_Stats.csv
+
+**パス：** `Comparison_Result/anaTotal/All_Total_File_Stats.csv`
+
+`ana_make_utterance_data.py` の出力ファイル。
+
+**必須カラム：**
+
+| カラム名 | 型 | 説明 |
+|---|---|---|
+| ConvID | str | 会話ID（例：C002_001） |
+| SpeakerID | str | 話者IC（例：IC01） |
+| Gender | str | 性別（Male / Female） |
+| Condition | str | 条件（[Non-Elderly] / [Elderly] / [Late Elderly]） |
+| DataType | str | 発話単位タイプ（Section_LUU / LUU / Bunsetsu） |
+| 音響特徴量 | float | Duration_ms, SpeechRate, MeanF0_Hz, ... 等 |
+
+---
+
+## 2.3 分析対象指標
+
+### 2.3.1 24種類の音響指標
+
+```python
+METRICS = [
+    'Duration_ms', 'SpeechRate',
+    'MeanF0_Hz', 'StdF0_Hz', 'MaxF0_Hz', 'MinF0_Hz', 'F0_Range_Hz',
+    'MeanF0_Semitone', 'StdF0_Semitone',
+    'TerminalRise_Slope_Hz', 'TerminalRise_Slope_Semi',
+    'MeanIntensity_dB', 'MeanVowelDuration_ms', 'VSA_Area',
+    'F1_a', 'F2_a', 'F1_i', 'F2_i', 'F1_u', 'F2_u', 'F1_e', 'F2_e', 'F1_o', 'F2_o'
+]
+```
+
+**カテゴリ別分類：**
+
+| カテゴリ | 指標 | 個数 |
+|---|---|---|
+| **時間** | Duration_ms, SpeechRate | 2 |
+| **ピッチ（Hz）** | MeanF0_Hz, StdF0_Hz, MaxF0_Hz, MinF0_Hz, F0_Range_Hz | 5 |
+| **ピッチ（半音）** | MeanF0_Semitone, StdF0_Semitone | 2 |
+| **末尾ピッチ傾き** | TerminalRise_Slope_Hz, TerminalRise_Slope_Semi | 2 |
+| **その他** | MeanIntensity_dB, MeanVowelDuration_ms, VSA_Area | 3 |
+| **フォルマント** | F1_{a/i/u/e/o}, F2_{a/i/u/e/o} | 10 |
+
+---
+
+## 2.4 比較ペアとデータタイプ
+
+### 2.4.1 3つの比較ペア
+
+```python
+PAIRS = [
+    {"target": "[Elderly]", "baseline": "[Non-Elderly]", "pair_name": "Non vs Elderly"},
+    {"target": "[Late Elderly]", "baseline": "[Non-Elderly]", "pair_name": "Non vs Late Elderly"},
+    {"target": "[Late Elderly]", "baseline": "[Elderly]", "pair_name": "Elderly vs Late Elderly"}
+]
+```
+
+**分析の意図：**
+
+| ペア | 研究上の意義 |
+|---|---|
+| Non vs Elderly | 高齢者への適応的発話の基本パターン |
+| Non vs Late Elderly | 後期高齢者への特殊な配慮 |
+| Elderly vs Late Elderly | 前期・後期高齢者への段階的変化 |
+
+---
+
+### 2.4.2 3つのデータタイプ
+
+```python
+DATA_TYPES = ['Section_LUU', 'LUU', 'Bunsetsu']
+```
+
+各データタイプは独立して分析されます。  
+これにより、発話単位の粒度による違いを検証できます。
+
+**分析回数の計算：**
+
+```
+総分析数 = 24指標 × 3ペア × 3データタイプ = 216 回（検定ごと）
+```
+
+---
+
+## 2.5 前処理：グループ変数の生成
+
+```python
+def main():
+    df = pd.read_csv(INPUT_FILE)
+    
+    # 話者グループを抽出
+    df['SpeakerGroup'] = df['ConvID'].astype(str).str.split('_').str[0]
+    
+    # セッションを抽出（末尾のアルファベットを削除）
+    df['Session'] = df['ConvID'].astype(str).str.replace(r'[a-zA-Z]+$', '', regex=True)
+```
+
+### 2.5.1 SpeakerGroup の定義
+
+**目的：** 同一話者の複数セッション・複数条件のデータをグループ化
+
+**抽出ロジック：**
+
+```python
+ConvID.split('_')[0]
+```
+
+**例：**
+
+| ConvID | SpeakerGroup |
+|---|---|
+| C002_001 | C002 |
+| C002_001a | C002 |
+| C002_001b | C002 |
+| C015_012 | C015 |
+| T001_test | T001 |
+
+**解釈：**
+- C002 という話者は複数のセッション（001, 001a, 001b等）でデータを持つ
+- LMMでは SpeakerGroup をランダム効果として扱い、話者内の相関を制御
+
+---
+
+### 2.5.2 Session の定義
+
+**目的：** 同一会話セッション内の発話をグループ化
+
+**抽出ロジック：**
+
+```python
+ConvID.replace(r'[a-zA-Z]+$', '', regex=True)
+```
+
+**正規表現の説明：**
+- `[a-zA-Z]+`：1文字以上のアルファベット
+- `$`：文字列の末尾
+- 末尾のアルファベット（a, b, c等）を削除
+
+**例：**
+
+| ConvID | Session |
+|---|---|
+| C002_001 | C002_001 |
+| C002_001a | C002_001 |
+| C002_001b | C002_001 |
+| C015_012_test | C015_012_test |
+
+**解釈：**
+- 同一セッション（001, 001a, 001b）は同じ会話の異なる部分
+- Hierarchical LMMでは Session をネストした変量効果として扱う
+
+---
+
+## 2.6 統計検定1：Welch の t 検定
+
+### 2.6.1 目的
+
+等分散を仮定しない2標本 t 検定により、条件間の平均値差を評価します。
+
+### 2.6.2 実装
+
+```python
+def run_utterance_ttest(df):
+    results = []
+    
+    for dtype in DATA_TYPES:
+        df_dtype = df[df['DataType'] == dtype].copy()
+        
+        for pair in PAIRS:
+            baseline = pair["baseline"]
+            target = pair["target"]
+            
+            d_base = df_dtype[df_dtype['Condition'] == baseline]
+            d_target = df_dtype[df_dtype['Condition'] == target]
+            
+            for metric in METRICS:
+                v_base = d_base[metric].dropna()
+                v_target = d_target[metric].dropna()
+                
+                if len(v_base) < 2 or len(v_target) < 2:
+                    # サンプル不足
+                    results.append({..., 'Sig': "Insufficient Data"})
+                    continue
+                
+                try:
+                    # Welch の t 検定（等分散を仮定しない）
+                    t, p = stats.ttest_ind(v_target, v_base, equal_var=False)
+                    
+                    # Cohen's d（効果量）
+                    d_val = cohen_d(v_target, v_base)
+                    
+                    sig = get_sig_char(p)
+                    
+                    results.append({
+                        'DataType': dtype,
+                        'Pair': pair_name,
+                        'Metric': metric,
+                        'N_Baseline': len(v_base),
+                        'N_Target': len(v_target),
+                        'Mean_Baseline': v_base.mean(),
+                        'Mean_Target': v_target.mean(),
+                        't_stat': t,
+                        'p_value': p,
+                        'Cohen_d': d_val,
+                        'Sig': sig
+                    })
+                except Exception as e:
+                    # エラー処理
+```
+
+### 2.6.3 効果量：Cohen's d
+
+```python
+def cohen_d(x, y):
+    nx, ny = len(x), len(y)
+    dof = nx + ny - 2
+    if dof <= 0: return np.nan
+    
+    # プールされた標準偏差
+    pooled_std = np.sqrt(((nx - 1) * np.var(x, ddof=1) + (ny - 1) * np.var(y, ddof=1)) / dof)
+    
+    # Cohen's d
+    return (np.mean(x) - np.mean(y)) / pooled_std if pooled_std > 0 else np.nan
+```
+
+**数式：**
+
+$$d = \frac{\bar{x}_1 - \bar{x}_2}{s_{\text{pooled}}}$$
+
+$$s_{\text{pooled}} = \sqrt{\frac{(n_1 - 1)s_1^2 + (n_2 - 1)s_2^2}{n_1 + n_2 - 2}}$$
+
+**解釈：**
+
+| |d| | 効果の大きさ |
+|---|---|
+| 0.2 | 小 |
+| 0.5 | 中 |
+| 0.8 | 大 |
+
+---
+
+### 2.6.4 出力ファイル
+
+**パス：** `Comparison_Result/anaTest/Step4_ttest_All_Utterances_Comprehensive.csv`
+
+**カラム：**
+
+| カラム名 | 型 | 説明 |
+|---|---|---|
+| DataType | str | 発話単位タイプ |
+| Pair | str | 比較ペア名 |
+| Baseline | str | ベースライン条件 |
+| Target | str | 対象条件 |
+| Metric | str | 音響指標名 |
+| N_Total | int | 総サンプル数 |
+| N_Baseline | int | ベースラインのサンプル数 |
+| N_Target | int | 対象のサンプル数 |
+| Mean_Baseline | float | ベースラインの平均値 |
+| Mean_Target | float | 対象の平均値 |
+| t_stat | float | t 統計量 |
+| p_value | float | p 値 |
+| Cohen_d | float | 効果量 |
+| Sig | str | 有意性記号（***, **, *, n.s.） |
+
+---
+
+## 2.7 統計検定2：Speaker-Only LMM（話者のみ変量効果）
+
+### 2.7.1 目的
+
+話者（SpeakerGroup）をランダム効果として扱い、  
+発話の反復測定による擬似反復を制御した上で条件効果を推定します。
+
+### 2.7.2 モデル式
+
+**フルモデル（条件効果あり）：**
+
+$$y_{ij} = \beta_0 + \beta_1 \times \text{Condition}_{ij} + u_i + \epsilon_{ij}$$
+
+- $y_{ij}$：話者 $i$ の発話 $j$ における音響特徴量
+- $\beta_0$：切片（ベースライン条件の平均）
+- $\beta_1$：条件効果（ベースラインから対象への変化量）
+- $u_i \sim N(0, \sigma_u^2)$：話者 $i$ のランダム効果
+- $\epsilon_{ij} \sim N(0, \sigma_\epsilon^2)$：残差
+
+**Nullモデル（条件効果なし）：**
+
+$$y_{ij} = \beta_0 + u_i + \epsilon_{ij}$$
+
+---
+
+### 2.7.3 実装
+
+```python
+def run_utterance_lmm_speaker_only(df):
+    results = []
+    
+    for dtype in DATA_TYPES:
+        df_dtype = df[df['DataType'] == dtype].copy()
+        
+        for pair in PAIRS:
+            baseline = pair["baseline"]
+            target = pair["target"]
+            
+            sub = df_dtype[df_dtype['Condition'].isin([baseline, target])].copy()
+            
+            for metric in METRICS:
+                # 欠損値除外
+                clean = sub.dropna(subset=[metric, 'Condition', 'SpeakerGroup'])
+                
+                n_total = len(clean)
+                n_speakers = clean['SpeakerGroup'].nunique()
+                
+                # 最小サンプル数チェック
+                if n_total < 10 or n_speakers < 2:
+                    results.append({..., 'Sig': "Insufficient Data"})
+                    continue
+                
+                try:
+                    # ① フルモデル（Conditionあり）
+                    formula_full = f"{metric} ~ C(Condition, Treatment('{baseline}'))"
+                    model_full = smf.mixedlm(formula_full, clean, groups=clean["SpeakerGroup"])
+                    fit_full = model_full.fit(reml=False)  # 最尤推定
+                    
+                    # ② Nullモデル（Conditionなし：切片のみ）
+                    formula_null = f"{metric} ~ 1"
+                    model_null = smf.mixedlm(formula_null, clean, groups=clean["SpeakerGroup"])
+                    fit_null = model_null.fit(reml=False)
+                    
+                    # ③ 尤度比検定（Likelihood Ratio Test）
+                    lr_stat = -2 * (fit_null.llf - fit_full.llf)
+                    p_val_lrt = chi2.sf(lr_stat, 1)  # 自由度1のχ²分布
+                    sig = get_sig_char(p_val_lrt)
+                    
+                    # 条件効果の係数を取得
+                    target_param_name = f"C(Condition, Treatment('{baseline}'))[T.{target}]"
+                    if target_param_name in fit_full.pvalues.index:
+                        coef = fit_full.params[target_param_name]
+                        std_err = fit_full.bse[target_param_name]
+                    else:
+                        coef = fit_full.params.iloc[1]
+                        std_err = fit_full.bse.iloc[1]
+                    
+                    results.append({
+                        'DataType': dtype,
+                        'Pair': pair_name,
+                        'Metric': metric,
+                        'N_Total': n_total,
+                        'N_Speakers': n_speakers,
+                        'Coef (Beta)': coef,
+                        'Std_Err': std_err,
+                        'LR_chi2': lr_stat,
+                        'LRT_p_value': p_val_lrt,
+                        'Sig': sig
+                    })
+                
+                except Exception as e:
+                    # 収束エラー
+                    results.append({..., 'Sig': "Convergence Error"})
+```
+
+---
+
+### 2.7.4 尤度比検定（Likelihood Ratio Test）の詳細
+
+**仮説：**
+
+- $H_0$：条件効果なし（Nullモデルが真）
+- $H_1$：条件効果あり（フルモデルが真）
+
+**検定統計量：**
+
+$$\text{LR} = -2 \times (\ell_{\text{null}} - \ell_{\text{full}})$$
+
+- $\ell_{\text{null}}$：Nullモデルの対数尤度
+- $\ell_{\text{full}}$：フルモデルの対数尤度
+
+**分布：**
+
+$H_0$ のもとで、LR は自由度 $df = k_{\text{full}} - k_{\text{null}}$ の $\chi^2$ 分布に従います。
+
+本分析では：
+- $k_{\text{full}} = 2$（切片 + 条件）
+- $k_{\text{null}} = 1$（切片のみ）
+- $df = 1$
+
+**p 値の計算：**
+
+```python
+p_val_lrt = chi2.sf(lr_stat, 1)
+```
+
+`chi2.sf()` は $\chi^2$ 分布の生存関数（survival function）：
+
+$$p = P(\chi^2_1 \geq \text{LR})$$
+
+---
+
+### 2.7.5 REML vs ML
+
+**REML（制限付き最尤推定）：**
+- 固定効果のパラメータ数を考慮した推定
+- 分散成分の推定にバイアスが少ない
+- モデル比較には使用できない
+
+**ML（最尤推定）：**
+- 尤度を直接最大化
+- モデル比較に使用可能
+- 本分析では `reml=False` を指定
+
+---
+
+### 2.7.6 出力ファイル
+
+**パス：** `Comparison_Result/anaTest/Step4_LMM_SpeakerOnly_All_Utterances.csv`
+
+**カラム：**
+
+| カラム名 | 説明 |
+|---|---|
+| DataType | 発話単位タイプ |
+| Pair | 比較ペア名 |
+| Baseline / Target | ベースライン条件 / 対象条件 |
+| Metric | 音響指標名 |
+| N_Total | 総発話数 |
+| N_Baseline / N_Target | 各条件の発話数 |
+| N_Speakers | 話者数 |
+| Coef (Beta) | 条件効果の推定値（$\beta_1$） |
+| Std_Err | 標準誤差 |
+| LR_chi2 | 尤度比統計量 |
+| LRT_p_value | p 値 |
+| Sig | 有意性記号 |
+
+---
+
+## 2.8 統計検定3：Hierarchical LMM（階層型）
+
+### 2.8.1 目的
+
+話者（SpeakerGroup）とセッション（Session）の2層をランダム効果として扱い、  
+より詳細な階層構造を考慮します。
+
+**階層構造：**
+
+```
+話者（SpeakerGroup）
+  └── セッション（Session）
+        └── 発話（個別の観測値）
+```
+
+---
+
+### 2.8.2 モデル式
+
+**フルモデル：**
+
+$$y_{ijk} = \beta_0 + \beta_1 \times \text{Condition}_{ijk} + u_i + v_{ij} + \epsilon_{ijk}$$
+
+- $y_{ijk}$：話者 $i$、セッション $j$、発話 $k$ の音響特徴量
+- $u_i \sim N(0, \sigma_u^2)$：話者 $i$ のランダム効果
+- $v_{ij} \sim N(0, \sigma_v^2)$：セッション $ij$ のランダム効果
+- $\epsilon_{ijk} \sim N(0, \sigma_\epsilon^2)$：残差
+
+**Nullモデル：**
+
+$$y_{ijk} = \beta_0 + u_i + v_{ij} + \epsilon_{ijk}$$
+
+---
+
+### 2.8.3 実装
+
+```python
+def run_utterance_lmm_hierarchical(df):
+    results = []
+    
+    for dtype in DATA_TYPES:
+        df_dtype = df[df['DataType'] == dtype].copy()
+        
+        for pair in PAIRS:
+            baseline = pair["baseline"]
+            target = pair["target"]
+            
+            sub = df_dtype[df_dtype['Condition'].isin([baseline, target])].copy()
+            
+            for metric in METRICS:
+                clean = sub.dropna(subset=[metric, 'Condition', 'SpeakerGroup', 'Session'])
+                
+                n_total = len(clean)
+                n_speakers = clean['SpeakerGroup'].nunique()
+                n_sessions = clean['Session'].nunique()
+                
+                if n_total < 10 or n_speakers < 2 or n_sessions < 2:
+                    results.append({..., 'Sig': "Insufficient Data"})
+                    continue
+                
+                try:
+                    # Variance Components Formula（セッションをネストした変量効果）
+                    vcf = {"Session": "0 + C(Session)"}
+                    
+                    # ① フルモデル
+                    formula_full = f"{metric} ~ C(Condition, Treatment('{baseline}'))"
+                    model_full = smf.mixedlm(
+                        formula_full, clean, 
+                        groups=clean["SpeakerGroup"],
+                        vc_formula=vcf
+                    )
+                    fit_full = model_full.fit(reml=False)
+                    
+                    # ② Nullモデル
+                    formula_null = f"{metric} ~ 1"
+                    model_null = smf.mixedlm(
+                        formula_null, clean,
+                        groups=clean["SpeakerGroup"],
+                        vc_formula=vcf
+                    )
+                    fit_null = model_null.fit(reml=False)
+                    
+                    # ③ 尤度比検定
+                    lr_stat = -2 * (fit_null.llf - fit_full.llf)
+                    p_val_lrt = chi2.sf(lr_stat, 1)
+                    sig = get_sig_char(p_val_lrt)
+                    
+                    # 係数取得
+                    # ... (Speaker-Only LMMと同様) ...
+                    
+                    results.append({
+                        'DataType': dtype,
+                        'Pair': pair_name,
+                        'Metric': metric,
+                        'N_Total': n_total,
+                        'N_Speakers': n_speakers,
+                        'N_Sessions': n_sessions,
+                        'Coef (Beta)': coef,
+                        'Std_Err': std_err,
+                        'LR_chi2': lr_stat,
+                        'LRT_p_value': p_val_lrt,
+                        'Sig': sig
+                    })
+                
+                except Exception as e:
+                    # 収束エラー → フォールバック
+                    try:
+                        # Sessionを除外してSpeaker-Only LMMで再試行
+                        model_full_fb = smf.mixedlm(formula_full, clean, groups=clean["SpeakerGroup"])
+                        fit_full_fb = model_full_fb.fit(reml=False)
+                        
+                        model_null_fb = smf.mixedlm(formula_null, clean, groups=clean["SpeakerGroup"])
+                        fit_null_fb = model_null_fb.fit(reml=False)
+                        
+                        lr_stat = -2 * (fit_null_fb.llf - fit_full_fb.llf)
+                        p_val_lrt = chi2.sf(lr_stat, 1)
+                        sig = get_sig_char(p_val_lrt)
+                        
+                        # ... 係数取得 ...
+                        
+                        results.append({
+                            ...,
+                            'Sig': sig + " (Fallback)"  # フォールバックを明示
+                        })
+                    except Exception as fallback_e:
+                        # フォールバックも失敗
+                        results.append({..., 'Sig': "Convergence Error"})
+```
+
+---
+
+### 2.8.4 Variance Components Formula
+
+```python
+vc_formula = {"Session": "0 + C(Session)"}
+```
+
+**意味：**
+- `Session` をカテゴリカル変量効果として追加
+- `0 +` は切片を含めない（各セッションが独立した効果を持つ）
+
+**statsmodelsの仕様：**
+- `groups` パラメータ：主要なランダム効果（SpeakerGroup）
+- `vc_formula` パラメータ：追加のランダム効果（Session）
+
+**ネスト構造：**
+- Session は SpeakerGroup にネストされている
+- 同一 SpeakerGroup 内の Session 間の変動を捉える
+
+---
+
+### 2.8.5 フォールバック機構
+
+**目的：** 階層モデルの収束失敗時に自動的に簡略化
+
+**動作：**
+
+1. Hierarchical LMM を試行
+2. 収束エラーが発生
+3. Session を除外して Speaker-Only LMM で再試行
+4. 結果の `Sig` カラムに `" (Fallback)"` を付加
+
+**利点：**
+- データ損失を最小化
+- 完全失敗よりも簡略化モデルの結果を得る方が有益
+
+---
+
+### 2.8.6 出力ファイル
+
+**パス：** `Comparison_Result/anaTest/Step4_LMM_Hierarchical_All_Utterances.csv`
+
+**カラム：**
+
+| カラム名 | 説明 |
+|---|---|
+| DataType | 発話単位タイプ |
+| Pair | 比較ペア名 |
+| Baseline / Target | ベースライン条件 / 対象条件 |
+| Metric | 音響指標名 |
+| N_Total | 総発話数 |
+| N_Baseline / N_Target | 各条件の発話数 |
+| N_Speakers | 話者数 |
+| N_Sessions | セッション数 |
+| Coef (Beta) | 条件効果の推定値 |
+| Std_Err | 標準誤差 |
+| LR_chi2 | 尤度比統計量 |
+| LRT_p_value | p 値 |
+| Sig | 有意性記号（フォールバック時は "(Fallback)" 付加） |
+
+---
+
+## 2.9 有意性記号
+
+```python
+def get_sig_char(p):
+    if pd.isna(p): return "n.s."
+    if p < 0.001: return "***"
+    if p < 0.01: return "**"
+    if p < 0.05: return "*"
+    return "n.s."
+```
+
+| 記号 | p 値範囲 | 解釈 |
+|---|---|---|
+| `***` | p < 0.001 | 極めて有意 |
+| `**` | p < 0.01 | 非常に有意 |
+| `*` | p < 0.05 | 有意 |
+| `n.s.` | p ≥ 0.05 | 有意差なし（not significant） |
+
+---
+
+## 2.10 実行フロー
+
+```python
+def main():
+    print("Loading All Utterance Data...")
+    if not os.path.exists(INPUT_FILE):
+        print(f"Input file not found: {INPUT_FILE}")
+        return
+    
+    df = pd.read_csv(INPUT_FILE)
+    setup_dirs()
+    
+    # グループ変数を生成
+    df['SpeakerGroup'] = df['ConvID'].astype(str).str.split('_').str[0]
+    df['Session'] = df['ConvID'].astype(str).str.replace(r'[a-zA-Z]+$', '', regex=True)
+    
+    # 全ての検定を順番に実行
+    run_utterance_ttest(df)
+    run_utterance_lmm_speaker_only(df)
+    run_utterance_lmm_hierarchical(df)
+    
+    print("\nAll analyses completed successfully.")
+```
+
+**実行順序：**
+
+1. データ読み込み
+2. グループ変数生成（SpeakerGroup, Session）
+3. t検定（216回）
+4. Speaker-Only LMM（216回）
+5. Hierarchical LMM（216回）
+
+**総検定回数：** 648回（24指標 × 3ペア × 3データタイプ × 3検定）
+
+---
+
+## 2.11 実行例
+
+### 2.11.1 基本的な実行
+
+```bash
+cd /path/to/project
+python ana_test_LMM.py
+```
+
+### 2.11.2 標準出力例
+
+```
+Loading All Utterance Data...
+
+==========================================================
+--- Running Welch's t-test on all utterances ---
+==========================================================
+Integrating 127 files...
+
+==========================================================
+--- Running Step 4: Speaker-Only LMM (Likelihood Ratio Test) ---
+==========================================================
+[LMM Speaker-Only] Section_LUU  | Non vs Elderly            | MeanF0_Hz                 -> N= 3421, Speakers=28, Chi2= 15.34, Sig=***
+[LMM Speaker-Only] Section_LUU  | Non vs Elderly            | StdF0_Hz                  -> N= 3421, Speakers=28, Chi2=  8.92, Sig=**
+[LMM Speaker-Only] Section_LUU  | Non vs Elderly            | TerminalRise_Slope_Hz     -> N= 3156, Speakers=28, Chi2= 22.18, Sig=***
+...
+
+==========================================================
+--- Running Step 4: Hierarchical LMM (Likelihood Ratio Test) ---
+==========================================================
+[LMM Hierarchical] Section_LUU  | Non vs Elderly            | MeanF0_Hz                 -> N= 3421, Speakers=28, Sessions=42, Chi2= 16.21, Sig=***
+[LMM Fallback] Section_LUU  | Non vs Elderly            | VSA_Area                  -> (Session removed), Chi2= 3.14, Sig=n.s. (Fallback)
+...
+
+All analyses completed successfully.
+```
+
+---
+
+### 2.11.3 実行時間の目安
+
+**データ規模：**
+- 総発話数：50,000
+- 話者数：30
+- セッション数：60
+
+**実行時間（概算）：**
+
+| 検定 | 時間 |
+|---|---|
+| t検定 | 2-5分 |
+| Speaker-Only LMM | 30-60分 |
+| Hierarchical LMM | 60-120分 |
+| **合計** | **約2-3時間** |
+
+**注意：**
+- LMMの収束計算はデータサイズに強く依存
+- 数十万発話の大規模データでは数時間〜半日かかる場合あり
+
+---
+
+## 2.12 結果の解釈
+
+### 2.12.1 3つの検定の比較
+
+| 検定 | 制御する変動 | 保守性 | 適用場面 |
+|---|---|---|---|
+| Welch t検定 | なし | 低 | 探索的分析、全体傾向 |
+| Speaker-Only LMM | 話者内相関 | 中 | 話者差を考慮した推論 |
+| Hierarchical LMM | 話者+セッション内相関 | 高 | 厳密な統計的推論 |
+
+**保守性：** 有意差が出にくいほど保守的
+
+---
+
+### 2.12.2 結果の優先順位
+
+**推奨される解釈の順序：**
+
+1. **Hierarchical LMM の結果を優先**（最も厳密）
+2. フォールバックの場合は Speaker-Only LMM の結果を参照
+3. t検定は参考情報として活用
+
+**論文での報告例：**
+
+> Terminal Rise Slope (Hz) は、非高齢者条件と比較して高齢者条件で有意に増加した  
+> （Hierarchical LMM: β = 12.3, SE = 3.2, χ² = 14.6, p < 0.001）。
+
+---
+
+### 2.12.3 効果の方向性
+
+**Coef (Beta) の解釈：**
+
+- **正の値**：対象条件 > ベースライン条件（増加）
+- **負の値**：対象条件 < ベースライン条件（減少）
+
+**例：**
+
+| Metric | Baseline | Target | Beta | 解釈 |
+|---|---|---|---|---|
+| MeanF0_Hz | [Non-Elderly] | [Elderly] | +8.5 | 高齢者への発話でピッチが高くなる |
+| SpeechRate | [Non-Elderly] | [Elderly] | -0.3 | 高齢者への発話で速度が遅くなる |
+
+---
+
+## 2.13 トラブルシューティング
+
+### 2.13.1 収束エラーが多発する
+
+**原因：**
+- データ数が少ない
+- 分散成分の推定が不安定
+- カテゴリ変数の水準が多すぎる
+
+**対処法：**
+
+1. データを増やす（より多くのファイルを処理）
+2. 最小サンプル数の閾値を調整：
+
+```python
+if n_total < 20 or n_speakers < 5:  # より厳しい条件
+```
+
+3. フォールバック機構を信頼する（Speaker-Only でも十分）
+
+---
+
+### 2.13.2 メモリ不足エラー
+
+**原因：** 大規模データセット（数十万行）でメモリを使い果たす
+
+**対処法：**
+
+1. データタイプごとに分割して実行：
+
+```python
+# Section_LUU のみを分析
+df_section = df[df['DataType'] == 'Section_LUU']
+run_utterance_lmm_speaker_only(df_section)
+```
+
+2. 指標を絞る：
+
+```python
+METRICS = ['MeanF0_Hz', 'SpeechRate', 'TerminalRise_Slope_Hz']  # 主要指標のみ
+```
+
+---
+
+### 2.13.3 実行時間が長すぎる
+
+**対処法：**
+
+1. 並列実行（複数のターミナルで異なるデータタイプを実行）
+2. サーバー・クラスタでの実行
+3. サブサンプリング（分析を急ぐ場合）：
+
+```python
+# 10%をサンプリング
+df_sample = df.sample(frac=0.1, random_state=42)
+```
+
+---
+
+## 2.14 統計的妥当性の確認
+
+### 2.14.1 前提条件のチェック
+
+**LMMの前提：**
+
+1. **残差の正規性**：QQプロットで確認
+2. **等分散性**：残差プロットで確認
+3. **ランダム効果の正規性**：BLUPプロットで確認
+
+**確認コード例：**
+
+```python
+import matplotlib.pyplot as plt
+
+# 残差のQQプロット
+from scipy import stats
+residuals = fit_full.resid
+stats.probplot(residuals, dist="norm", plot=plt)
+plt.title("QQ Plot of Residuals")
+plt.show()
+```
+
+---
+
+### 2.14.2 多重比較補正
+
+**問題：** 216回（または648回）の検定を行うため、偽陽性のリスクが高い
+
+**対処法：**
+
+1. **Bonferroni補正**（保守的）：
+
+```python
+alpha_corrected = 0.05 / 216  # ≈ 0.000231
+```
+
+2. **FDR（False Discovery Rate）補正**（推奨）：
+
+```python
+from statsmodels.stats.multitest import multipletests
+
+p_values = results_df['LRT_p_value'].values
+reject, p_adj, _, _ = multipletests(p_values, alpha=0.05, method='fdr_bh')
+results_df['p_adj_FDR'] = p_adj
+```
+
+3. **研究上の重要性で絞る**：主要な指標（3-5個）に焦点を当てる
+
+---
+
+## 2.15 まとめ
+
+### 2.15.1 ana_test_LMM.py の特徴
+
+✓ **包括的**：24指標 × 3ペア × 3データタイプ = 216パターンを網羅  
+✓ **多層的**：3種類の統計検定で異なる視点から評価  
+✓ **堅牢**：フォールバック機構により収束エラーを最小化  
+✓ **厳密**：尤度比検定により条件効果の有意性を正確に評価  
+✓ **実用的**：CSV出力により結果の二次利用が容易
+
+---
+
+### 2.15.2 推奨される使用方法
+
+1. **探索段階**：t検定で全体的な傾向を把握
+2. **検証段階**：Speaker-Only LMM で話者差を制御
+3. **論文執筆**：Hierarchical LMM の結果を主に報告
+4. **補足資料**：3つの検定結果を比較表として提示
+
+---
+
+### 2.15.3 今後の拡張可能性
+
+- **交互作用の追加**：Condition × Gender 等
+- **共変量の追加**：年齢・会話時間等
+- **ベイズ統計**：brms パッケージ（R）での実装
+- **機械学習**：ランダムフォレストでの特徴量重要度評価
+
+---
