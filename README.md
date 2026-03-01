@@ -1221,26 +1221,34 @@ w_int = np.nanmean(i_vals_w) if len(i_vals_w) > 0 else np.nan
 | カラム名 | 型 | 説明 |
 |---|---|---|
 | 会話ID | str | 会話識別子（例：C002_006a） |
-| 対高齢者含む | int | 65歳以上で構成される場合 1 |
-| 対後期高齢者含む | int | 75歳以上で構成される場合 1 |
+| 対高齢者含む | int | 65歳以上が含まれる場合 1 |
+| 対高齢者のみ | int | 65歳以上のみと話している場合 1 |
+| 対後期高齢者のみ | int | 75歳以上のみと話している場合 1 |
 
 **条件判定ロジック：**
 
 ```python
 if r.get('対高齢者含む') == 0:
     conditions.append("[Non-Elderly]")
+
 if r.get('対高齢者のみ') == 1:
-    conditions.append("[Elderly]")
+    if "[Elderly]" not in conditions:
+        conditions.append("[Elderly]")
+        
 if r.get('対後期高齢者のみ') == 1:
-    conditions.append("[Late Elderly]")
+    if "[Late Elderly]" not in conditions:
+        conditions.append("[Late Elderly]")
+    if "[Elderly]" not in conditions:
+        conditions.append("[Elderly]")
 ```
 
 - **[Non-Elderly]**：参加者全員が0-64歳（対高齢者含む = 0）
-- **[Elderly]**：65歳以上の参加者だけ（対高齢者のみ = 1）
-- **[Late Elderly]**：75歳以上の参加者だけ（対後期高齢者のみ = 1）
+- **[Elderly]**：65歳以上のみと話している（対高齢者のみ = 1）
+- **[Late Elderly]**：75歳以上のみと話している（対後期高齢者のみ = 1）
 
-**重要：** 1つのセッションが複数条件を満たす場合（例：75歳以上の場合は自動的に65歳以上）、  
-`[Elderly]` と `[Late Elderly]` の両方のラベルが付与されます。
+**重要：** 後期高齢者のみと話している場合（`対後期高齢者のみ = 1`）は、  
+自動的に `[Elderly]` ラベルも付与されます。これは、75歳以上は必ず65歳以上でもあるためです。  
+したがって、`[Late Elderly]` データは常に `[Elderly]` データとしても記録されます。
 
 ---
 
@@ -1365,7 +1373,7 @@ conditions = []
 ses_row = df_ses[df_ses['会話ID'] == conv_id]
 
 if ses_row.empty:
-    # プレフィックスマッチングを試行（C002_001a → C002_001）
+    # プレフィックスマッチングを試行（C002_001a → C002）
     short_id = conv_id.split('_')[0]
     ses_row = df_ses[df_ses['会話ID'] == short_id]
 
@@ -1376,13 +1384,18 @@ if not ses_row.empty:
     if r.get('対高齢者含む') == 0:
         conditions.append("[Non-Elderly]")
     
-    # 対高齢者: 65歳以上の参加者が含まれる
+    # 対高齢者: 65歳以上のみと話している
     if r.get('対高齢者のみ') == 1:
-        conditions.append("[Elderly]")
+        if "[Elderly]" not in conditions:
+            conditions.append("[Elderly]")
     
-    # 対後期高齢者: 75歳以上の参加者が含まれる
+    # 対後期高齢者: 75歳以上のみと話している
     if r.get('対後期高齢者のみ') == 1:
-        conditions.append("[Late Elderly]")
+        if "[Late Elderly]" not in conditions:
+            conditions.append("[Late Elderly]")
+        # 後期高齢者は必ず高齢者でもあるので自動追加
+        if "[Elderly]" not in conditions:
+            conditions.append("[Elderly]")
 else:
     conditions.append("Unknown")
 ```
@@ -1393,9 +1406,14 @@ else:
 3. それでも見つからない場合、"Unknown" を付与
 
 **条件の複数付与：**
-- 例：65歳と75歳の両方が参加するセッション
-  - `conditions = ["[Elderly]", "[Late Elderly]"]`
+- 例：後期高齢者のみと話しているセッション（`対後期高齢者のみ = 1`）
+  - `conditions = ["[Late Elderly]", "[Elderly]"]`
   - 後述の処理で、各条件ごとにデータを複製
+
+**重要な変更点：**
+- `対高齢者のみ = 1`：65歳以上**のみ**と話している（より限定的）
+- `対後期高齢者のみ = 1`：75歳以上**のみ**と話している（より限定的）
+- 後期高齢者のみの場合は、必ず高齢者のみでもあるため、両方のラベルが自動付与されます
 
 ---
 
@@ -1450,7 +1468,7 @@ except Exception as e:
 
 **F0_Range_Hz の計算：**
 
-$$\text{F0}\textunderscore\text{Range}\textunderscore\text{Hz} = \text{MaxF0}\textunderscore\text{Hz} - \text{MinF0}\textunderscore\text{Hz}$$
+$$\text{F0\_Range\_Hz} = \text{MaxF0\_Hz} - \text{MinF0\_Hz}$$
 
 これは発話内のピッチ変動幅を表します。  
 `ana_acoustic.py` では MaxF0_Hz と MinF0_Hz のみを出力するため、  
@@ -2603,35 +2621,3 @@ results_df['p_adj_FDR'] = p_adj
 ```
 
 3. **研究上の重要性で絞る**：主要な指標（3-5個）に焦点を当てる
-
----
-
-## 2.15 まとめ
-
-### 2.15.1 ana_test_LMM.py の特徴
-
-✓ **包括的**：24指標 × 3ペア × 3データタイプ = 216パターンを網羅  
-✓ **多層的**：3種類の統計検定で異なる視点から評価  
-✓ **堅牢**：フォールバック機構により収束エラーを最小化  
-✓ **厳密**：尤度比検定により条件効果の有意性を正確に評価  
-✓ **実用的**：CSV出力により結果の二次利用が容易
-
----
-
-### 2.15.2 推奨される使用方法
-
-1. **探索段階**：t検定で全体的な傾向を把握
-2. **検証段階**：Speaker-Only LMM で話者差を制御
-3. **論文執筆**：Hierarchical LMM の結果を主に報告
-4. **補足資料**：3つの検定結果を比較表として提示
-
----
-
-### 2.15.3 今後の拡張可能性
-
-- **交互作用の追加**：Condition × Gender 等
-- **共変量の追加**：年齢・会話時間等
-- **ベイズ統計**：brms パッケージ（R）での実装
-- **機械学習**：ランダムフォレストでの特徴量重要度評価
-
----
